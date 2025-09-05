@@ -6517,10 +6517,10 @@ This action fixes all auto-fixable issues in the buffer."
     (2 . lsp-face-highlight-read)
     (3 . lsp-face-highlight-write)))
 
-(defun lsp--remove-overlays (name)
-  (save-restriction
-    (widen)
-    (remove-overlays (point-min) (point-max) name t)))
+  (defun lsp--remove-overlays (name &optional start end)
+    (save-restriction
+      (widen)
+      (remove-overlays (or start (point-min)) (or end (point-max) ) name t)))
 
 (defun lsp-document-highlight ()
   "Highlight all relevant references to the symbol under point."
@@ -10248,22 +10248,44 @@ string."
                            :end
                            (lsp-point-to-position end)))
    (lambda (res)
-     (lsp--remove-overlays 'lsp-inlay-hint)
-     (dolist (hint res)
-       (-let* (((&InlayHint :label :position :kind? :padding-left? :padding-right?) hint)
-               (kind (or kind? lsp/inlay-hint-kind-type-hint))
-               (label (lsp--label-from-inlay-hints-response label))
-               (pos (lsp--position-to-point position))
-               (overlay (make-overlay pos pos nil 'front-advance 'end-advance)))
-         (when (stringp label)
-           (overlay-put overlay 'lsp-inlay-hint t)
-           (overlay-put overlay 'before-string
-                        (format "%s%s%s"
-                                (if padding-left? " " "")
-                                (propertize (lsp--format-inlay label kind)
-                                            'font-lock-face (lsp--face-for-inlay kind))
-                                (if padding-right? " " "")))))))
-   :mode 'tick))
+     (lsp--remove-overlays 'lsp-inlay-hint (window-start) (window-end))
+     ;; Batch convert all positions to points in one lsp-save-restriction-and-excursion call
+     (let* ((positions (mapcar (lambda (hint) (lsp:inlay-hint-position hint)) res))
+            (position-to-point-map (make-hash-table :test 'equal))
+            (inhibit-field-text-motion t))
+       ;; Convert all positions to points in one batch operation
+       (when positions
+         (lsp-save-restriction-and-excursion
+           (goto-char (point-min))
+           (let ((current-line 0))
+             (dolist (position positions)
+               (-let (((&Position :line :character) position))
+                 ;; Move to the target line efficiently
+                 (forward-line (- line current-line))
+                 (setq current-line line)
+                 ;; Calculate point for this character position
+                 (let* ((line-start (point))
+                        (line-end (line-end-position))
+                        (target-point (if (> character (- line-end line-start))
+                                          line-end
+                                        (+ line-start character))))
+                   (puthash position target-point position-to-point-map)))))))
+       ;; Now create overlays using the pre-calculated points
+       (dolist (hint res)
+         (-let* (((&InlayHint :label :position :kind? :padding-left? :padding-right?) hint)
+                 (kind (or kind? lsp/inlay-hint-kind-type-hint))
+                 (label (lsp--label-from-inlay-hints-response label))
+                 (pos (gethash position position-to-point-map))
+                 (overlay (make-overlay pos pos nil 'front-advance 'end-advance)))
+           (when (stringp label)
+             (overlay-put overlay 'lsp-inlay-hint t)
+             (overlay-put overlay 'before-string
+                          (format "%s%s%s"
+                                  (if padding-left? " " "")
+                                  (propertize (lsp--format-inlay label kind)
+                                              'font-lock-face (lsp--face-for-inlay kind))
+                                  (if padding-right? " " "")))))))
+   :mode 'tick)))
 
 (define-minor-mode lsp-inlay-hints-mode
   "Mode for displaying inlay hints."
